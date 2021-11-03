@@ -13,7 +13,7 @@ import (
 
 // Global variables for FluentdPiloter
 const (
-	FLUENTD_EXEC_CMD  = "/usr/bin/fluentd"
+	FLUENTD_EXEC_CMD  = "/usr/local/bin/fluentd"
 	FLUENTD_BASE_CONF = "/etc/fluentd"
 	FLUENTD_CONF_DIR  = FLUENTD_BASE_CONF + "/conf.d"
 	FLUENTD_CONF_FILE = FLUENTD_BASE_CONF + "/fluentd.conf"

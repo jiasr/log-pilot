@@ -2,7 +2,22 @@ package pilot
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"github.com/containerd/containerd"
+	_ "github.com/containerd/containerd/api/events"
+	cdevents "github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/typeurl"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
+	k8s "github.com/docker/docker/client"
+	_ "github.com/kubernetes-sigs/cri-tools/pkg/common"
+	_ "github.com/kubernetes-sigs/cri-tools/pkg/version"
+	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/context"
 	"io"
 	"io/ioutil"
 	"os"
@@ -13,14 +28,6 @@ import (
 	"sync"
 	"text/template"
 	"time"
-
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/mount"
-	k8s "github.com/docker/docker/client"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 )
 
 /**
@@ -60,6 +67,7 @@ type Pilot struct {
 	baseDir       string
 	logPrefix     []string
 	createSymlink bool
+	cdclient      *containerd.Client
 }
 
 // Run start log pilot
@@ -87,6 +95,8 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 		return nil, err
 	}
 
+	cdclient, err := containerd.New("/run/containerd/containerd.sock")
+
 	piloter, err := NewPiloter(baseDir)
 	if err != nil {
 		return nil, err
@@ -108,6 +118,7 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 		piloter:       piloter,
 		logPrefix:     logPrefix,
 		createSymlink: createSymlink,
+		cdclient:  cdclient,
 	}, nil
 }
 
@@ -130,6 +141,8 @@ func (p *Pilot) watch() error {
 	options := types.EventsOptions{
 		Filters: filter,
 	}
+
+	//p.watch_containerd()
 
 	msgs, errs := p.client.Events(ctx, options)
 
@@ -165,6 +178,83 @@ func (p *Pilot) watch() error {
 	<-p.stopChan
 	close(p.reloadChan)
 	close(p.stopChan)
+	return nil
+}
+
+func (p *Pilot) watch_containerd() error{
+
+		namespacelist, _ :=p.cdclient.NamespaceService().List(context.Background())
+		var labelNames []string
+		//sort keys
+		for _, name :=range namespacelist{
+			log.Info(name)
+			ctx := namespaces.WithNamespace(context.Background(), name)
+			list, _ := p.cdclient.Containers(ctx)
+
+			for i := 0; i <= len(list)-1; i++ {
+				var contaier = list[i]
+				fmt.Println(contaier)
+				labelNames = append(labelNames, contaier.ID())
+			}
+
+		}
+
+		fmt.Println(labelNames)
+
+
+		eventsCh, errCh := p.cdclient.EventService().Subscribe(context.Background())
+		for {
+			var e *cdevents.Envelope
+			var err error
+
+			select {
+			case e = <-eventsCh:
+				log.Info("RECIVE EVENT FROM CONTAINERD")
+			case err = <-errCh:
+				log.Info("ERROR FOR CONTAINERD EVENT")
+			}
+			log.Info(err)
+			var out []byte
+			if e != nil {
+				if e.Topic == "/containers/create"{
+					log.Infof("event type: %v, deal it", e.Topic)
+
+					if e.Event != nil {
+						decoded, err := typeurl.UnmarshalAny(e.Event)
+						if err != nil {
+							log.Errorf("format event error")
+							continue
+						}
+						out, err = json.Marshal(decoded)
+						adaptor, ok := decoded.(interface {Field([]string) (string, bool)})
+						if !ok {
+							log.Errorf("decoded event error")
+							continue
+						}else{
+							log.Info(adaptor)
+
+						}
+					}
+
+
+
+				}else{
+					log.Infof("event type: %v, continue", e.Topic)
+					continue
+				}
+				if _, err := fmt.Println(
+					e.Timestamp,
+					e.Namespace,
+					e.Topic,
+					string(out),
+				); err != nil {
+					log.Info("XXXXXXXXXXXXXX")
+				}
+			}
+		}
+
+
+
 	return nil
 }
 
@@ -213,6 +303,54 @@ func (p *Pilot) cleanConfigs() error {
 	return nil
 }
 
+func (p *Pilot) processAllContainers_Containerd() error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	log.Debug("process all container log config")
+
+	opts := types.ContainerListOptions{}
+	containers, err := p.client.ContainerList(context.Background(), opts)
+	if err != nil {
+		log.Errorf("fail to list container: %v", err)
+		return nil
+	}
+	for _, c := range containers {
+		log.Info(c)
+	}
+
+
+	containerIDs := make(map[string]string, 0)
+
+	for _, c := range containers {
+		if _, ok := containerIDs[c.ID]; !ok {
+			containerIDs[c.ID] = c.ID
+		}
+
+		if c.State == "removing" {
+			continue
+		}
+
+		if p.exists(c.ID) {
+			log.Debugf("%s is already exists", c.ID)
+			continue
+		}
+
+		containerJSON, err := p.client.ContainerInspect(context.Background(), c.ID)
+		if err != nil {
+			log.Errorf("fail to inspect container %s: %v", c.ID, err)
+			continue
+		}
+
+		if err = p.newContainer(&containerJSON); err != nil {
+			log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
+		}
+	}
+
+	return p.processSymlink(containerIDs)
+}
+
+
 func (p *Pilot) processAllContainers() error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
@@ -226,7 +364,16 @@ func (p *Pilot) processAllContainers() error {
 		return nil
 	}
 
+
+
+
+	for _, c := range containers {
+		log.Info(c)
+	}
+
+
 	containerIDs := make(map[string]string, 0)
+
 	for _, c := range containers {
 		if _, ok := containerIDs[c.ID]; !ok {
 			containerIDs[c.ID] = c.ID
@@ -351,6 +498,7 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	container := container(containerJSON)
 
 	for _, e := range env {
+		log.Info(e)
 		for _, prefix := range p.logPrefix {
 			serviceLogs := fmt.Sprintf(ENV_SERVICE_LOGS_TEMPL, prefix)
 			if !strings.HasPrefix(e, serviceLogs) {
@@ -431,6 +579,7 @@ func (p *Pilot) delContainer(id string) error {
 }
 
 func (p *Pilot) processEvent(msg events.Message) error {
+	log.Info(msg)
 	containerId := msg.Actor.ID
 	ctx := context.Background()
 
@@ -568,7 +717,7 @@ func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath strin
 
 	format := info.children["format"]
 	if format == nil || format.value == "none" {
-		format = newLogInfoNode("nonex")
+		format = newLogInfoNode("none")
 	}
 
 	formatConfig, err := Convert(format)
