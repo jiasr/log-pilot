@@ -4,20 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/containerd/containerd"
-	_ "github.com/containerd/containerd/api/events"
-	cdevents "github.com/containerd/containerd/events"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/typeurl"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/mount"
-	k8s "github.com/docker/docker/client"
-	_ "github.com/kubernetes-sigs/cri-tools/pkg/common"
-	_ "github.com/kubernetes-sigs/cri-tools/pkg/version"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"github.com/pkg/errors"
+	"google.golang.org/grpc"
 	"io"
 	"io/ioutil"
 	"os"
@@ -28,6 +16,26 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	"github.com/containerd/containerd"
+	cdevents "github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/typeurl"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
+	k8s "github.com/docker/docker/client"
+	"golang.org/x/net/context"
+	_ "google.golang.org/grpc"
+
+	internalapi "k8s.io/cri-api/pkg/apis"
+	pb "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	"k8s.io/kubernetes/pkg/kubelet/cri/remote"
+	"k8s.io/kubernetes/pkg/kubelet/util"
+
+	log "github.com/sirupsen/logrus"
 )
 
 /**
@@ -76,7 +84,9 @@ func Run(templ string, baseDir string) error {
 	if err != nil {
 		panic(err)
 	}
+	p.watch_containerd()
 	return p.watch()
+
 }
 
 // New returns a log pilot instance
@@ -120,6 +130,61 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 		createSymlink: createSymlink,
 		cdclient:  cdclient,
 	}, nil
+}
+
+var defaultRuntimeEndpoints = []string{"unix:///var/run/dockershim.sock", "unix:///run/containerd/containerd.sock", "unix:///run/crio/crio.sock"}
+var defaultTimeout = 2 * time.Second
+
+func  (p *Pilot) getRuntimeClientConnection() (*grpc.ClientConn, error) {
+
+	log.Debug("get runtime connection")
+	return p.getConnection(defaultRuntimeEndpoints)
+
+}
+func (p *Pilot) getConnection(endPoints []string) (*grpc.ClientConn, error) {
+	if endPoints == nil || len(endPoints) == 0 {
+		return nil, fmt.Errorf("endpoint is not set")
+	}
+	endPointsLen := len(endPoints)
+	var conn *grpc.ClientConn
+	for indx, endPoint := range endPoints {
+		log.Debugf("connect using endpoint '%s' with '%s' timeout", endPoint, defaultTimeout)
+		addr, dialer, err := util.GetAddressAndDialer(endPoint)
+		if err != nil {
+			if indx == endPointsLen-1 {
+				return nil, err
+			}
+			log.Error(err)
+			continue
+		}
+		conn, err = grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(defaultTimeout), grpc.WithContextDialer(dialer))
+		if err != nil {
+			errMsg := errors.Wrapf(err, "connect endpoint '%s', make sure you are running as root and the endpoint has been started", endPoint)
+			if indx == endPointsLen-1 {
+				return nil, errMsg
+			}
+			log.Error(errMsg)
+		} else {
+			log.Debugf("connected successfully using endpoint: %s", endPoint)
+			break
+		}
+	}
+	return conn, nil
+}
+
+
+func  (p *Pilot) getRuntimeService() (internalapi.RuntimeService, error) {
+	return remote.NewRemoteRuntimeService(defaultRuntimeEndpoints[0], defaultTimeout)
+}
+
+func (p *Pilot) getRuntimeClient() (pb.RuntimeServiceClient, *grpc.ClientConn, error) {
+	// Set up a connection to the server.
+	conn, err := p.getRuntimeClientConnection()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "connect")
+	}
+	runtimeClient := pb.NewRuntimeServiceClient(conn)
+	return runtimeClient, conn, nil
 }
 
 func (p *Pilot) watch() error {
@@ -181,6 +246,13 @@ func (p *Pilot) watch() error {
 	return nil
 }
 
+func closeConnection( conn *grpc.ClientConn) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
+}
+
 func (p *Pilot) watch_containerd() error{
 
 		namespacelist, _ :=p.cdclient.NamespaceService().List(context.Background())
@@ -195,6 +267,20 @@ func (p *Pilot) watch_containerd() error{
 				var contaier = list[i]
 				fmt.Println(contaier)
 				labelNames = append(labelNames, contaier.ID())
+				//runtimeClient, runtimeConn, err := p.getRuntimeClientConnection()
+				request := &pb.ContainerStatusRequest{
+					ContainerId: contaier.ID(),
+					Verbose:     false,
+				}
+				log.Debugf("ContainerStatusRequest: %v", request)
+				runtimeClient, runtimeConn, err := p.getRuntimeClient()
+				if err != nil {
+					return err
+				}
+				defer closeConnection(runtimeConn)
+				r, err := runtimeClient.ContainerStatus(context.Background(), request)
+				fmt.Print(r)
+
 			}
 
 		}
@@ -203,55 +289,58 @@ func (p *Pilot) watch_containerd() error{
 
 
 		eventsCh, errCh := p.cdclient.EventService().Subscribe(context.Background())
-		for {
-			var e *cdevents.Envelope
-			var err error
+	    go func() {
+			for {
+				var e *cdevents.Envelope
+				var err error
 
-			select {
-			case e = <-eventsCh:
-				log.Info("RECIVE EVENT FROM CONTAINERD")
-			case err = <-errCh:
-				log.Info("ERROR FOR CONTAINERD EVENT")
-			}
-			log.Info(err)
-			var out []byte
-			if e != nil {
-				if e.Topic == "/containers/create"{
-					log.Infof("event type: %v, deal it", e.Topic)
+				select {
+				case e = <-eventsCh:
+					log.Info("RECIVE EVENT FROM CONTAINERD")
+				case err = <-errCh:
+					log.Info("ERROR FOR CONTAINERD EVENT")
+				}
+				log.Info(err)
+				var out []byte
+				if e != nil {
+					if e.Topic == "/containers/create"{
+						log.Infof("event type: %v, deal it", e.Topic)
 
-					if e.Event != nil {
-						decoded, err := typeurl.UnmarshalAny(e.Event)
-						if err != nil {
-							log.Errorf("format event error")
-							continue
+						if e.Event != nil {
+							decoded, err := typeurl.UnmarshalAny(e.Event)
+							if err != nil {
+								log.Errorf("format event error")
+								continue
+							}
+							out, err = json.Marshal(decoded)
+							adaptor, ok := decoded.(interface {Field([]string) (string, bool)})
+							if !ok {
+								log.Errorf("decoded event error")
+								continue
+							}else{
+								log.Info(adaptor)
+
+							}
 						}
-						out, err = json.Marshal(decoded)
-						adaptor, ok := decoded.(interface {Field([]string) (string, bool)})
-						if !ok {
-							log.Errorf("decoded event error")
-							continue
-						}else{
-							log.Info(adaptor)
 
-						}
+
+
+					}else{
+						log.Infof("event type: %v, continue", e.Topic)
+						continue
 					}
-
-
-
-				}else{
-					log.Infof("event type: %v, continue", e.Topic)
-					continue
-				}
-				if _, err := fmt.Println(
-					e.Timestamp,
-					e.Namespace,
-					e.Topic,
-					string(out),
-				); err != nil {
-					log.Info("XXXXXXXXXXXXXX")
+					if _, err := fmt.Println(
+						e.Timestamp,
+						e.Namespace,
+						e.Topic,
+						string(out),
+					); err != nil {
+						log.Info("XXXXXXXXXXXXXX")
+					}
 				}
 			}
-		}
+		}()
+
 
 
 
