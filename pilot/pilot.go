@@ -85,7 +85,8 @@ func Run(templ string, baseDir string) error {
 		panic(err)
 	}
 	p.watch_containerd()
-	return p.watch()
+	return p.watch_containerd()
+	//return p.watch()
 
 }
 
@@ -132,7 +133,7 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 	}, nil
 }
 
-var defaultRuntimeEndpoints = []string{"unix:///var/run/dockershim.sock", "unix:///run/containerd/containerd.sock", "unix:///run/crio/crio.sock"}
+var defaultRuntimeEndpoints = []string{"unix:///run/containerd/containerd.sock", "unix:///run/crio/crio.sock"}
 var defaultTimeout = 2 * time.Second
 
 func  (p *Pilot) getRuntimeClientConnection() (*grpc.ClientConn, error) {
@@ -259,13 +260,13 @@ func (p *Pilot) watch_containerd() error{
 		var labelNames []string
 		//sort keys
 		for _, name :=range namespacelist{
-			log.Info(name)
+			log.Info("======================================================="+name)
 			ctx := namespaces.WithNamespace(context.Background(), name)
 			list, _ := p.cdclient.Containers(ctx)
 
 			for i := 0; i <= len(list)-1; i++ {
 				var contaier = list[i]
-				fmt.Println(contaier)
+				log.Debugf("======================="+contaier.ID())
 				labelNames = append(labelNames, contaier.ID())
 				//runtimeClient, runtimeConn, err := p.getRuntimeClientConnection()
 				request := &pb.ContainerStatusRequest{
@@ -279,13 +280,18 @@ func (p *Pilot) watch_containerd() error{
 				}
 				defer closeConnection(runtimeConn)
 				r, err := runtimeClient.ContainerStatus(context.Background(), request)
-				fmt.Print(r)
+				if err !=nil {
+					log.Debugf("get container error %v",err.Error())
+				}
+				if r != nil{
+					log.Debugf("get container %v",r)
+				}
+
 
 			}
 
 		}
-
-		fmt.Println(labelNames)
+	    log.Info("=======================================================")
 
 
 		eventsCh, errCh := p.cdclient.EventService().Subscribe(context.Background())
