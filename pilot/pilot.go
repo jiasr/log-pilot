@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/pkg/errors"
-	"google.golang.org/grpc"
+	cdevents "github.com/containerd/containerd/events"
+	"github.com/containerd/typeurl"
 	"io"
 	"io/ioutil"
 	"os"
@@ -18,10 +18,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd"
-	cdevents "github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/typeurl"
-
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -30,11 +27,7 @@ import (
 	"golang.org/x/net/context"
 	_ "google.golang.org/grpc"
 
-	internalapi "k8s.io/cri-api/pkg/apis"
 	pb "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-	"k8s.io/kubernetes/pkg/kubelet/cri/remote"
-	"k8s.io/kubernetes/pkg/kubelet/util"
-
 	log "github.com/sirupsen/logrus"
 )
 
@@ -76,6 +69,7 @@ type Pilot struct {
 	logPrefix     []string
 	createSymlink bool
 	cdclient      *containerd.Client
+	usedocker     bool
 }
 
 // Run start log pilot
@@ -84,9 +78,9 @@ func Run(templ string, baseDir string) error {
 	if err != nil {
 		panic(err)
 	}
-	p.watch_containerd()
-	return p.watch_containerd()
-	//return p.watch()
+	//p.watch_containerd()
+	//return p.watch_containerd()
+	return p.watch()
 
 }
 
@@ -120,6 +114,18 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 	}
 
 	createSymlink := os.Getenv(ENV_PILOT_CREATE_SYMLINK) == "true"
+
+	var docker_sock_location  = "/var/run/docker.sock"
+	_, err = os.Stat(docker_sock_location)
+	var usedockertuntime  = true
+	if err == nil {
+		log.Info("there is no docker.sock file ======>use containerd")
+		usedockertuntime = false
+	}else{
+		log.Info("there is have docker.sock file ======>use docker")
+		usedockertuntime = true
+	}
+
 	return &Pilot{
 		client:        client,
 		templ:         templ,
@@ -130,63 +136,10 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 		logPrefix:     logPrefix,
 		createSymlink: createSymlink,
 		cdclient:  cdclient,
+		usedocker: usedockertuntime,
 	}, nil
 }
 
-var defaultRuntimeEndpoints = []string{"unix:///run/containerd/containerd.sock", "unix:///run/crio/crio.sock"}
-var defaultTimeout = 2 * time.Second
-
-func  (p *Pilot) getRuntimeClientConnection() (*grpc.ClientConn, error) {
-
-	log.Debug("get runtime connection")
-	return p.getConnection(defaultRuntimeEndpoints)
-
-}
-func (p *Pilot) getConnection(endPoints []string) (*grpc.ClientConn, error) {
-	if endPoints == nil || len(endPoints) == 0 {
-		return nil, fmt.Errorf("endpoint is not set")
-	}
-	endPointsLen := len(endPoints)
-	var conn *grpc.ClientConn
-	for indx, endPoint := range endPoints {
-		log.Debugf("connect using endpoint '%s' with '%s' timeout", endPoint, defaultTimeout)
-		addr, dialer, err := util.GetAddressAndDialer(endPoint)
-		if err != nil {
-			if indx == endPointsLen-1 {
-				return nil, err
-			}
-			log.Error(err)
-			continue
-		}
-		conn, err = grpc.Dial(addr, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(defaultTimeout), grpc.WithContextDialer(dialer))
-		if err != nil {
-			errMsg := errors.Wrapf(err, "connect endpoint '%s', make sure you are running as root and the endpoint has been started", endPoint)
-			if indx == endPointsLen-1 {
-				return nil, errMsg
-			}
-			log.Error(errMsg)
-		} else {
-			log.Debugf("connected successfully using endpoint: %s", endPoint)
-			break
-		}
-	}
-	return conn, nil
-}
-
-
-func  (p *Pilot) getRuntimeService() (internalapi.RuntimeService, error) {
-	return remote.NewRemoteRuntimeService(defaultRuntimeEndpoints[0], defaultTimeout)
-}
-
-func (p *Pilot) getRuntimeClient() (pb.RuntimeServiceClient, *grpc.ClientConn, error) {
-	// Set up a connection to the server.
-	conn, err := p.getRuntimeClientConnection()
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "connect")
-	}
-	runtimeClient := pb.NewRuntimeServiceClient(conn)
-	return runtimeClient, conn, nil
-}
 
 func (p *Pilot) watch() error {
 	if err := p.cleanConfigs(); err != nil {
@@ -201,101 +154,49 @@ func (p *Pilot) watch() error {
 	p.lastReload = time.Now()
 	go p.doReload()
 
-	ctx := context.Background()
-	filter := filters.NewArgs()
-	filter.Add("type", "container")
-	options := types.EventsOptions{
-		Filters: filter,
-	}
+	if p.usedocker{
+		ctx := context.Background()
+		filter := filters.NewArgs()
+		filter.Add("type", "container")
+		options := types.EventsOptions{
+			Filters: filter,
+		}
 
-	//p.watch_containerd()
+		msgs, errs := p.client.Events(ctx, options)
 
-	msgs, errs := p.client.Events(ctx, options)
+		go func() {
+			defer func() {
+				log.Warn("finish to watch event")
+				p.stopChan <- true
+			}()
 
-	go func() {
-		defer func() {
-			log.Warn("finish to watch event")
-			p.stopChan <- true
+			log.Info("begin to watch event")
+
+			for {
+				select {
+				case msg := <-msgs:
+					if err := p.processEvent(msg); err != nil {
+						log.Errorf("fail to process event: %v,  %v", msg, err)
+					}
+				case err := <-errs:
+					log.Warnf("error: %v", err)
+					if err == io.EOF || err == io.ErrUnexpectedEOF {
+						return
+					}
+					msgs, errs = p.client.Events(ctx, options)
+				}
+			}
 		}()
 
-		log.Info("begin to watch event")
-
-		for {
-			select {
-			case msg := <-msgs:
-				if err := p.processEvent(msg); err != nil {
-					log.Errorf("fail to process event: %v,  %v", msg, err)
-				}
-			case err := <-errs:
-				log.Warnf("error: %v", err)
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					return
-				}
-				msgs, errs = p.client.Events(ctx, options)
-			}
+		time.Sleep(time.Second * 1)
+		if err := p.processAllContainers(); err != nil {
+			return err
 		}
-	}()
 
-	time.Sleep(time.Second * 1)
-	if err := p.processAllContainers(); err != nil {
-		return err
-	}
-
-	<-p.stopChan
-	close(p.reloadChan)
-	close(p.stopChan)
-	return nil
-}
-
-func closeConnection( conn *grpc.ClientConn) error {
-	if conn == nil {
-		return nil
-	}
-	return conn.Close()
-}
-
-func (p *Pilot) watch_containerd() error{
-
-		namespacelist, _ :=p.cdclient.NamespaceService().List(context.Background())
-		var labelNames []string
-		//sort keys
-		for _, name :=range namespacelist{
-			log.Info("======================================================="+name)
-			ctx := namespaces.WithNamespace(context.Background(), name)
-			list, _ := p.cdclient.Containers(ctx)
-
-			for i := 0; i <= len(list)-1; i++ {
-				var contaier = list[i]
-				log.Debugf("======================="+contaier.ID())
-				labelNames = append(labelNames, contaier.ID())
-				//runtimeClient, runtimeConn, err := p.getRuntimeClientConnection()
-				request := &pb.ContainerStatusRequest{
-					ContainerId: contaier.ID(),
-					Verbose:     false,
-				}
-				log.Debugf("ContainerStatusRequest: %v", request)
-				runtimeClient, runtimeConn, err := p.getRuntimeClient()
-				if err != nil {
-					return err
-				}
-				defer closeConnection(runtimeConn)
-				r, err := runtimeClient.ContainerStatus(context.Background(), request)
-				if err !=nil {
-					log.Debugf("get container error %v",err.Error())
-				}
-				if r != nil{
-					log.Debugf("get container %v",r)
-				}
-
-
-			}
-
-		}
-	    log.Info("=======================================================")
-
-
+	}else{
+		log.Info("there is no docker.sock file ======>use containerd")
 		eventsCh, errCh := p.cdclient.EventService().Subscribe(context.Background())
-	    go func() {
+		go func() {
 			for {
 				var e *cdevents.Envelope
 				var err error
@@ -328,9 +229,6 @@ func (p *Pilot) watch_containerd() error{
 
 							}
 						}
-
-
-
 					}else{
 						log.Infof("event type: %v, continue", e.Topic)
 						continue
@@ -347,11 +245,21 @@ func (p *Pilot) watch_containerd() error{
 			}
 		}()
 
+		time.Sleep(time.Second * 1)
+		if err := p.processAllContainers(); err != nil {
+			return err
+		}
 
 
 
+
+	}
+	<-p.stopChan
+	close(p.reloadChan)
+	close(p.stopChan)
 	return nil
 }
+
 
 // LogConfig log configuration
 type LogConfig struct {
@@ -367,6 +275,7 @@ type LogConfig struct {
 	Stdout       bool
 }
 
+//clear the fluentd config
 func (p *Pilot) cleanConfigs() error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
@@ -398,104 +307,112 @@ func (p *Pilot) cleanConfigs() error {
 	return nil
 }
 
-func (p *Pilot) processAllContainers_Containerd() error {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
-	log.Debug("process all container log config")
-
-	opts := types.ContainerListOptions{}
-	containers, err := p.client.ContainerList(context.Background(), opts)
-	if err != nil {
-		log.Errorf("fail to list container: %v", err)
-		return nil
-	}
-	for _, c := range containers {
-		log.Info(c)
-	}
-
-
-	containerIDs := make(map[string]string, 0)
-
-	for _, c := range containers {
-		if _, ok := containerIDs[c.ID]; !ok {
-			containerIDs[c.ID] = c.ID
-		}
-
-		if c.State == "removing" {
-			continue
-		}
-
-		if p.exists(c.ID) {
-			log.Debugf("%s is already exists", c.ID)
-			continue
-		}
-
-		containerJSON, err := p.client.ContainerInspect(context.Background(), c.ID)
-		if err != nil {
-			log.Errorf("fail to inspect container %s: %v", c.ID, err)
-			continue
-		}
-
-		if err = p.newContainer(&containerJSON); err != nil {
-			log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
-		}
-	}
-
-	return p.processSymlink(containerIDs)
-}
-
-
 func (p *Pilot) processAllContainers() error {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-
 	log.Debug("process all container log config")
-
-	opts := types.ContainerListOptions{}
-	containers, err := p.client.ContainerList(context.Background(), opts)
-	if err != nil {
-		log.Errorf("fail to list container: %v", err)
-		return nil
-	}
-
-
-
-
-	for _, c := range containers {
-		log.Info(c)
-	}
-
-
 	containerIDs := make(map[string]string, 0)
 
-	for _, c := range containers {
-		if _, ok := containerIDs[c.ID]; !ok {
-			containerIDs[c.ID] = c.ID
-		}
-
-		if c.State == "removing" {
-			continue
-		}
-
-		if p.exists(c.ID) {
-			log.Debugf("%s is already exists", c.ID)
-			continue
-		}
-
-		containerJSON, err := p.client.ContainerInspect(context.Background(), c.ID)
+	if p.usedocker{
+		opts := types.ContainerListOptions{}
+		containers, err := p.client.ContainerList(context.Background(), opts)
 		if err != nil {
-			log.Errorf("fail to inspect container %s: %v", c.ID, err)
-			continue
+			log.Errorf("fail to list container: %v", err)
+			return nil
 		}
 
-		if err = p.newContainer(&containerJSON); err != nil {
-			log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
+		for _, c := range containers {
+			log.Info(c)
 		}
+
+		for _, c := range containers {
+			if _, ok := containerIDs[c.ID]; !ok {
+				containerIDs[c.ID] = c.ID
+			}
+
+			if c.State == "removing" {
+				continue
+			}
+
+			if p.exists(c.ID) {
+				log.Debugf("%s is already exists", c.ID)
+				continue
+			}
+
+			containerJSON, err := p.client.ContainerInspect(context.Background(), c.ID)
+			if err != nil {
+				log.Errorf("fail to inspect container %s: %v", c.ID, err)
+				continue
+			}
+
+			if err = p.newContainer(&containerJSON); err != nil {
+				log.Errorf("fail to process container %s: %v", containerJSON.Name, err)
+			}
+		}
+
+	} else{
+
+		namespacelist, _ :=p.cdclient.NamespaceService().List(context.Background())
+
+		var labelNames []string
+		for _, name :=range namespacelist{
+			if name == "k8s.io"{
+				log.Info("get  namespace"+name +"deal it ")
+				ctx := namespaces.WithNamespace(context.Background(), name)
+				list, _ := p.cdclient.Containers(ctx)
+				for i := 0; i <= len(list)-1; i++ {
+					var contaier = list[i]
+					log.Info("======================="+contaier.ID())
+					if p.exists(contaier.ID()) {
+						log.Info("%s config file is already exists continue", contaier.ID())
+						continue
+					}
+					labelNames = append(labelNames, contaier.ID())
+					request := &pb.ContainerStatusRequest{
+						ContainerId: contaier.ID(),
+						Verbose:     true,
+					}
+					runtimeClient, _, err := getRuntimeClient()
+					if err != nil {
+						log.Error("getRuntimeClient: ERROR", request)
+						return nil
+					}
+					log.Info("ContainerStatusRequest: %v", request)
+
+					r, err := runtimeClient.ContainerStatus(context.Background(), request)
+					if err !=nil {
+						log.Debugf("get container error %v",err.Error())
+						continue
+					}
+					if r != nil{
+						log.Debugf("get container %s",contaier.ID())
+					}
+
+					if r.Status.State != pb.ContainerState_CONTAINER_RUNNING{
+						log.Info("continue ===>container state is %v", r.Status.State)
+						//continue
+					}
+
+
+					if err = p.newRemoteContainer(r); err != nil {
+						log.Errorf("fail to process container %s: %v",contaier.ID(), err)
+					}
+
+				}
+
+			}else{
+				log.Info("get  namespace"+name  +"continue")
+			}
+
+
+
+		}
+
+
 	}
-
 	return p.processSymlink(containerIDs)
 }
+
 
 func (p *Pilot) processSymlink(existingContainerIDs map[string]string) error {
 	symlinkContainerIDs := p.listAllSymlinkContainer()
@@ -636,6 +553,46 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	p.tryReload()
 	return nil
 }
+
+
+
+
+func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) error {
+
+	id := statusResponse.Status.Id
+	info  := statusResponse.GetInfo()
+	var infostru  InfoStru
+	err := json.Unmarshal([]byte(info["info"]), &infostru)
+	if err !=nil{
+		return err
+	}
+	jsonLogPath := statusResponse.Status.LogPath
+	log.Print(id)
+	log.Print(jsonLogPath)
+	log.Print(id)
+
+	for _, e := range infostru.RuntimeSpec.Process.Env {
+		log.Info(e)
+		for _, prefix := range p.logPrefix {
+			serviceLogs := fmt.Sprintf(ENV_SERVICE_LOGS_TEMPL, prefix)
+			if !strings.HasPrefix(e, serviceLogs) {
+				continue
+			}
+			envLabel := strings.SplitN(e, "=", 2)
+			if len(envLabel) == 2 {
+				//labelKey := strings.Replace(envLabel[0], "_", ".", -1)
+				//labels[labelKey] = envLabel[1]
+			}
+		}
+	}
+
+
+	p.tryReload()
+	return nil
+
+}
+
+
 
 func (p *Pilot) tryReload() {
 	select {
@@ -1079,3 +1036,4 @@ func (p *Pilot) removeVolumeSymlink(containerId string) error {
 	}
 	return nil
 }
+
