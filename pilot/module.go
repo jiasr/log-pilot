@@ -1,5 +1,6 @@
 package pilot
 
+
 type ENV struct{
 	Key string
 	Value string
@@ -7,11 +8,10 @@ type ENV struct{
 type Mount struct{
 	Container_path string
 	Host_ptah string
-	Readonly string
 }
 type InfoStru  struct{
-	SandboxID string
-	Pid   string
+	//SandboxID string
+	//Pid   string
 	Config struct {
 		Envs [] ENV
 		Mounts [] Mount
@@ -36,3 +36,19 @@ type InfoStru  struct{
 	}
 
 }
+
+
+// LogConfig log configuration
+type LogConfig struct {
+	Name         string
+	HostDir      string
+	ContainerDir string
+	Format       string
+	FormatConfig map[string]string
+	File         string
+	Tags         map[string]string
+	Target       string
+	EstimateTime bool
+	Stdout       bool
+}
+

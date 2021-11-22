@@ -84,6 +84,25 @@ func Run(templ string, baseDir string) error {
 
 }
 
+/*
+   判断文件或文件夹是否存在
+   如果返回的错误为nil,说明文件或文件夹存在
+   如果返回的错误类型使用os.IsNotExist()判断为true,说明文件或文件夹不存在
+   如果返回的错误为其它类型,则不确定是否在存在
+*/
+func PathExists(path string) (bool, error) {
+
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+
 // New returns a log pilot instance
 func New(tplStr string, baseDir string) (*Pilot, error) {
 	templ, err := template.New("pilot").Parse(tplStr)
@@ -116,15 +135,19 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 	createSymlink := os.Getenv(ENV_PILOT_CREATE_SYMLINK) == "true"
 
 	var docker_sock_location  = "/var/run/docker.sock"
-	_, err = os.Stat(docker_sock_location)
 	var usedockertuntime  = true
-	if err == nil {
-		log.Info("there is no docker.sock file ======>use containerd")
-		usedockertuntime = false
+	b, err := PathExists(docker_sock_location)
+	log.Info(b)
+	log.Info(err)
+
+	if err != nil {
+		log.Info("PathExists(%s),err(%v)\n", docker_sock_location, err)
 	}else{
-		log.Info("there is have docker.sock file ======>use docker")
-		usedockertuntime = true
+		usedockertuntime  = false
 	}
+
+	log.Info("usedockertuntime====>%v",usedockertuntime)
+
 
 	return &Pilot{
 		client:        client,
@@ -261,19 +284,7 @@ func (p *Pilot) watch() error {
 }
 
 
-// LogConfig log configuration
-type LogConfig struct {
-	Name         string
-	HostDir      string
-	ContainerDir string
-	Format       string
-	FormatConfig map[string]string
-	File         string
-	Tags         map[string]string
-	Target       string
-	EstimateTime bool
-	Stdout       bool
-}
+
 
 //clear the fluentd config
 func (p *Pilot) cleanConfigs() error {
@@ -491,6 +502,10 @@ func container(containerJSON *types.ContainerJSON) map[string]string {
 	return c
 }
 
+
+
+
+
 func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	id := containerJSON.ID
 	env := containerJSON.Config.Env
@@ -559,6 +574,10 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 
 func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) error {
 
+
+	var labels map[string]string =  make(map[string]string)
+	var mounts [] types.MountPoint
+
 	id := statusResponse.Status.Id
 	info  := statusResponse.GetInfo()
 	var infostru  InfoStru
@@ -567,9 +586,10 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 		return err
 	}
 	jsonLogPath := statusResponse.Status.LogPath
-	log.Print(id)
-	log.Print(jsonLogPath)
-	log.Print(id)
+
+	//
+	infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std=stdout")
+	infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std_tag=a=1,b=2")
 
 	for _, e := range infostru.RuntimeSpec.Process.Env {
 		log.Info(e)
@@ -580,12 +600,55 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 			}
 			envLabel := strings.SplitN(e, "=", 2)
 			if len(envLabel) == 2 {
-				//labelKey := strings.Replace(envLabel[0], "_", ".", -1)
-				//labels[labelKey] = envLabel[1]
+
+				labelKey := strings.Replace(envLabel[0], "_", ".", -1)
+				labels[labelKey] = envLabel[1]
 			}
 		}
 	}
+	log.Info(labels)
 
+	c := make(map[string]string)
+	putIfNotEmpty(c, "docker_app", "-")
+	putIfNotEmpty(c, "docker_app", "-")
+	putIfNotEmpty(c, "docker_service", "-")
+	putIfNotEmpty(c, "docker_service", "-")
+	putIfNotEmpty(c, "k8s_pod", labels[LABEL_POD])
+	putIfNotEmpty(c, "k8s_pod_namespace", labels[LABEL_K8S_POD_NAMESPACE])
+	putIfNotEmpty(c, "k8s_container_name", labels[LABEL_K8S_CONTAINER_NAME])
+	putIfNotEmpty(c, "k8s_node_name", os.Getenv("NODE_NAME"))
+
+
+	for _, e := range infostru.RuntimeSpec.Mounts{
+		log.Info(e)
+		var tmp types.MountPoint
+		tmp.Destination = e.Destination
+		tmp.Source = e.Source
+		mounts = append(mounts, tmp)
+	}
+	log.Info(mounts)
+
+	logConfigs, err := p.getLogConfigs(jsonLogPath, mounts, labels)
+	if err != nil {
+		return err
+	}
+
+	if len(logConfigs) == 0 {
+		log.Debugf("%s has not log config, skip", id)
+		return nil
+	}
+
+	//pilot.findMounts(logConfigs, jsonLogPath, mounts)
+	//生成配置
+	logConfig, err := p.render(id, c, logConfigs)
+	if err != nil {
+		return err
+	}
+	//TODO validate config before save
+	log.Debugf("container %s log config: %s", id, logConfig)
+	if err = ioutil.WriteFile(p.piloter.GetConfPath(id), []byte(logConfig), os.FileMode(0644)); err != nil {
+		return err
+	}
 
 	p.tryReload()
 	return nil
