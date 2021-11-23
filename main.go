@@ -41,6 +41,26 @@ func getGID() uint64 {
 	return n
 }
 
+/*
+   判断文件或文件夹是否存在
+   如果返回的错误为nil,说明文件或文件夹存在
+   如果返回的错误类型使用os.IsNotExist()判断为true,说明文件或文件夹不存在
+   如果返回的错误为其它类型,则不确定是否在存在
+*/
+func PathExists(path string) (bool, error) {
+
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+
+
 func main() {
 
 	template := flag.String("template", "", "Template filepath for fluentd or filebeat.")
@@ -72,11 +92,28 @@ func main() {
 	log.Info(*base)
 	log.Info(logLevel)
 
+	var docker_sock_location  = "/var/run/docker.sock"
+	var usedockertuntime  = true
+	_, err = PathExists(docker_sock_location)
+	log.Info(err)
+	if err != nil {
+		log.Info("PathExists(%s),err(%v)\n", docker_sock_location, err)
+	}else{
+		usedockertuntime  = false
+	}
+
+
+	if !usedockertuntime{
+		*template = strings.Replace(*template,"fluentd.tpl","fluentdcd.tpl",-1)
+		log.Debug(*template)
+	}
 
 	b, err := ioutil.ReadFile(*template)
 	if err != nil {
 		panic(err)
 	}
 
-	log.Fatal(pilot.Run(string(b), baseDir))
+
+	log.Info("usedockertuntime====>%v",usedockertuntime)
+	log.Fatal(pilot.Run(string(b), baseDir,usedockertuntime))
 }

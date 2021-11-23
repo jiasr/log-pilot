@@ -27,8 +27,8 @@ import (
 	"golang.org/x/net/context"
 	_ "google.golang.org/grpc"
 
-	pb "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	log "github.com/sirupsen/logrus"
+	pb "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 /**
@@ -73,38 +73,20 @@ type Pilot struct {
 }
 
 // Run start log pilot
-func Run(templ string, baseDir string) error {
-	p, err := New(templ, baseDir)
+func Run(templ string, baseDir string,usedocker bool) error {
+	p, err := New(templ, baseDir,usedocker)
 	if err != nil {
 		panic(err)
 	}
-	//p.watch_containerd()
-	//return p.watch_containerd()
 	return p.watch()
 
 }
 
-/*
-   判断文件或文件夹是否存在
-   如果返回的错误为nil,说明文件或文件夹存在
-   如果返回的错误类型使用os.IsNotExist()判断为true,说明文件或文件夹不存在
-   如果返回的错误为其它类型,则不确定是否在存在
-*/
-func PathExists(path string) (bool, error) {
-
-	_, err := os.Stat(path)
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, err
-}
-
 
 // New returns a log pilot instance
-func New(tplStr string, baseDir string) (*Pilot, error) {
+func New(tplStr string, baseDir string,usedockertuntime bool) (*Pilot, error) {
+
+
 	templ, err := template.New("pilot").Parse(tplStr)
 	if err != nil {
 		return nil, err
@@ -133,20 +115,6 @@ func New(tplStr string, baseDir string) (*Pilot, error) {
 	}
 
 	createSymlink := os.Getenv(ENV_PILOT_CREATE_SYMLINK) == "true"
-
-	var docker_sock_location  = "/var/run/docker.sock"
-	var usedockertuntime  = true
-	b, err := PathExists(docker_sock_location)
-	log.Info(b)
-	log.Info(err)
-
-	if err != nil {
-		log.Info("PathExists(%s),err(%v)\n", docker_sock_location, err)
-	}else{
-		usedockertuntime  = false
-	}
-
-	log.Info("usedockertuntime====>%v",usedockertuntime)
 
 
 	return &Pilot{
@@ -569,9 +537,6 @@ func (p *Pilot) newContainer(containerJSON *types.ContainerJSON) error {
 	return nil
 }
 
-
-
-
 func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) error {
 
 
@@ -613,9 +578,9 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 	putIfNotEmpty(c, "docker_app", "-")
 	putIfNotEmpty(c, "docker_service", "-")
 	putIfNotEmpty(c, "docker_service", "-")
-	putIfNotEmpty(c, "k8s_pod", labels[LABEL_POD])
-	putIfNotEmpty(c, "k8s_pod_namespace", labels[LABEL_K8S_POD_NAMESPACE])
-	putIfNotEmpty(c, "k8s_container_name", labels[LABEL_K8S_CONTAINER_NAME])
+	putIfNotEmpty(c, "k8s_pod", infostru.Config.Labels.PodName)
+	putIfNotEmpty(c, "k8s_pod_namespace", infostru.Config.Labels.PodNamespace)
+	putIfNotEmpty(c, "k8s_container_name", infostru.Config.Labels.ContainerName)
 	putIfNotEmpty(c, "k8s_node_name", os.Getenv("NODE_NAME"))
 
 
@@ -654,8 +619,6 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 	return nil
 
 }
-
-
 
 func (p *Pilot) tryReload() {
 	select {
@@ -1012,6 +975,7 @@ func (p *Pilot) render(containerId string, container map[string]string, configLi
 	if err := p.templ.Execute(&buf, context); err != nil {
 		return "", err
 	}
+
 	return buf.String(), nil
 }
 
