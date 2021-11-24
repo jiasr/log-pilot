@@ -5,17 +5,18 @@
   path {{ .HostDir }}/{{ .File }}
   path_key tailed_path
   <parse>
-  @type {{ .Format }}
-  {{ $time_key := "" }}
-  {{if .FormatConfig}}
-  {{range $key, $value := .FormatConfig}}
-  {{ $key }} {{ $value }}
-  {{end}}
-  {{end}}
-  {{ if .EstimateTime }}
-  estimate_current_event true
-  {{end}}
-  keep_time_key true
+      @type regexp
+      expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+      {{ $time_key := "" }}
+      {{if .FormatConfig}}
+      {{range $key, $value := .FormatConfig}}
+      {{ $key }} {{ $value }}
+      {{end}}
+      {{end}}
+      {{ if .EstimateTime }}
+      estimate_current_event true
+      {{end}}
+      keep_time_key true
   </parse>
   read_from_head true
   pos_file /var/log/fluentd_pos/{{ $.containerId }}.{{ .Name }}.pos

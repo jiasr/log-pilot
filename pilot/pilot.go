@@ -194,20 +194,20 @@ func (p *Pilot) watch() error {
 
 				select {
 				case e = <-eventsCh:
-					log.Info("RECIVE EVENT FROM CONTAINERD")
+					log.Debug("RECIVE EVENT FROM CONTAINERD")
 				case err = <-errCh:
-					log.Info("ERROR FOR CONTAINERD EVENT")
+					log.Debug("ERROR FOR CONTAINERD EVENT")
 				}
-				log.Info(err)
+				log.Debug(err)
 				var out []byte
 				if e != nil {
 					if e.Topic == "/containers/create"{
-						log.Infof("event type: %v, deal it", e.Topic)
+						log.Infof("event type===================: %v, deal it", e.Topic)
 
 						if e.Event != nil {
 							decoded, err := typeurl.UnmarshalAny(e.Event)
 							if err != nil {
-								log.Errorf("format event error")
+								log.Errorf("format event error %v",err)
 								continue
 							}
 							out, err = json.Marshal(decoded)
@@ -221,7 +221,8 @@ func (p *Pilot) watch() error {
 							}
 						}
 					}else{
-						log.Infof("event type: %v, continue", e.Topic)
+
+						log.Debug("event type: %v, continue", e.Topic)
 						continue
 					}
 					if _, err := fmt.Println(
@@ -553,8 +554,8 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 	jsonLogPath := statusResponse.Status.LogPath
 
 	//
-	infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std=stdout")
-	infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std_tag=a=1,b=2")
+	//infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std=stdout")
+	//infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std_tag=a=1,b=2")
 
 	for _, e := range infostru.RuntimeSpec.Process.Env {
 		log.Info(e)
@@ -816,13 +817,21 @@ func (p *Pilot) parseLogConfig(name string, info *LogInfoNode, jsonLogPath strin
 			logFile = logFile + "*"
 		}
 
+		formatconfig := make(map[string]string)
+
+		if p.usedocker{
+			putIfNotEmpty(formatconfig, "time_format", "%Y-%m-%dT%H:%M:%S.%NZ")
+		}else{
+			putIfNotEmpty(formatconfig, "time_format", "%Y-%m-%dT%H:%M:%S.%N%z")
+		}
+
 		return &LogConfig{
 			Name:         name,
 			HostDir:      filepath.Join(p.baseDir, filepath.Dir(jsonLogPath)),
 			File:         logFile,
 			Format:       format.value,
 			Tags:         tagMap,
-			FormatConfig: map[string]string{"time_format": "%Y-%m-%dT%H:%M:%S.%NZ"},
+			FormatConfig: formatconfig,
 			Target:       target,
 			EstimateTime: false,
 			Stdout:       true,
