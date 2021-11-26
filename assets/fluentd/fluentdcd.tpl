@@ -5,8 +5,13 @@
   path {{ .HostDir }}/{{ .File }}
   path_key tailed_path
   <parse>
-      @type regexp
-      expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+      {{if .Stdout}}
+         @type regexp
+         expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+      {{else}}
+         @type nonex
+         time_format = %Y-%m-%dT%H:%M:%S.%NZ
+      {{end}}
       {{ $time_key := "" }}
       {{if .FormatConfig}}
       {{range $key, $value := .FormatConfig}}

@@ -4,8 +4,19 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/containerd/containerd"
+	_ "github.com/containerd/containerd/api/services/events/v1"
 	cdevents "github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/namespaces"
+	_ "github.com/containerd/containerd/services/events"
 	"github.com/containerd/typeurl"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
+	k8s "github.com/docker/docker/client"
+	"golang.org/x/net/context"
+	_ "google.golang.org/grpc"
 	"io"
 	"io/ioutil"
 	"os"
@@ -16,16 +27,6 @@ import (
 	"sync"
 	"text/template"
 	"time"
-
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/mount"
-	k8s "github.com/docker/docker/client"
-	"golang.org/x/net/context"
-	_ "google.golang.org/grpc"
 
 	log "github.com/sirupsen/logrus"
 	pb "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
@@ -79,6 +80,11 @@ func Run(templ string, baseDir string,usedocker bool) error {
 		panic(err)
 	}
 	return p.watch()
+
+}
+
+func init() {
+
 
 }
 
@@ -203,9 +209,10 @@ func (p *Pilot) watch() error {
 				if e != nil {
 					if e.Topic == "/containers/create"{
 						log.Infof("event type===================: %v, deal it", e.Topic)
-
 						if e.Event != nil {
-							decoded, err := typeurl.UnmarshalAny(e.Event)
+							fmt.Println(string(e.Event.Value))
+							var a interface{}
+							decoded := typeurl.UnmarshalToByTypeURL(e.Topic,e.Event.Value,a)
 							if err != nil {
 								log.Errorf("format event error %v",err)
 								continue
@@ -331,9 +338,7 @@ func (p *Pilot) processAllContainers() error {
 		}
 
 	} else{
-
 		namespacelist, _ :=p.cdclient.NamespaceService().List(context.Background())
-
 		var labelNames []string
 		for _, name :=range namespacelist{
 			if name == "k8s.io"{
