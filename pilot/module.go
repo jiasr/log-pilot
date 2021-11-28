@@ -52,3 +52,6 @@ type LogConfig struct {
 	Stdout       bool
 }
 
+type ContainerdEventCreate struct {
+	ID string
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/containerd/containerd"
+	_ "github.com/containerd/containerd/api/events"
 	_ "github.com/containerd/containerd/api/services/events/v1"
 	cdevents "github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/namespaces"
@@ -205,41 +206,50 @@ func (p *Pilot) watch() error {
 					log.Debug("ERROR FOR CONTAINERD EVENT")
 				}
 				log.Debug(err)
-				var out []byte
 				if e != nil {
 					if e.Topic == "/containers/create"{
 						log.Infof("event type===================: %v, deal it", e.Topic)
 						if e.Event != nil {
 							fmt.Println(string(e.Event.Value))
-							var a interface{}
-							decoded := typeurl.UnmarshalToByTypeURL(e.Topic,e.Event.Value,a)
+							decoded, err := typeurl.UnmarshalAny(e.Event)
 							if err != nil {
 								log.Errorf("format event error %v",err)
 								continue
 							}
-							out, err = json.Marshal(decoded)
-							adaptor, ok := decoded.(interface {Field([]string) (string, bool)})
-							if !ok {
-								log.Errorf("decoded event error")
-								continue
-							}else{
-								log.Info(adaptor)
 
+							aaa, err :=json.Marshal(decoded)
+							if err != nil {
+								log.Errorf("Marshal event error %v",err)
+								continue
 							}
+							var cdcreate ContainerdEventCreate
+							fmt.Println(aaa)
+							json.Unmarshal(aaa,&cdcreate)
+							fmt.Println(cdcreate.ID)
+							request := &pb.ContainerStatusRequest{
+								ContainerId: cdcreate.ID,
+								Verbose:     true,
+							}
+							runtimeClient, _, err := getRuntimeClient()
+							if err != nil {
+								log.Error("getRuntimeClient: ERROR", request)
+								continue
+							}
+							log.Info("ContainerStatusRequest: %v", request)
+
+							r, err := runtimeClient.ContainerStatus(context.Background(), request)
+							if err = p.newRemoteContainer(r); err != nil {
+								log.Errorf("fail to process container %s: %v",cdcreate.ID, err)
+							}
+
+
+
 						}
 					}else{
-
 						log.Debug("event type: %v, continue", e.Topic)
 						continue
 					}
-					if _, err := fmt.Println(
-						e.Timestamp,
-						e.Namespace,
-						e.Topic,
-						string(out),
-					); err != nil {
-						log.Info("XXXXXXXXXXXXXX")
-					}
+
 				}
 			}
 		}()
