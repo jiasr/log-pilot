@@ -210,7 +210,7 @@ func (p *Pilot) watch() error {
 					if e.Topic == "/containers/create"{
 						log.Infof("event type===================: %v, deal it", e.Topic)
 						if e.Event != nil {
-							fmt.Println(string(e.Event.Value))
+							//fmt.Println(string(e.Event.Value))
 							decoded, err := typeurl.UnmarshalAny(e.Event)
 							if err != nil {
 								log.Errorf("format event error %v",err)
@@ -223,7 +223,7 @@ func (p *Pilot) watch() error {
 								continue
 							}
 							var cdcreate ContainerdEventCreate
-							fmt.Println(aaa)
+							//fmt.Println(aaa)
 							json.Unmarshal(aaa,&cdcreate)
 							fmt.Println(cdcreate.ID)
 							request := &pb.ContainerStatusRequest{
@@ -238,11 +238,15 @@ func (p *Pilot) watch() error {
 							log.Info("ContainerStatusRequest: %v", request)
 
 							r, err := runtimeClient.ContainerStatus(context.Background(), request)
-							if err = p.newRemoteContainer(r); err != nil {
-								log.Errorf("fail to process container %s: %v",cdcreate.ID, err)
+							if err != nil{
+								//bug -- if can,t find a container,reload all
+								log.Errorf("runtimeClient.ContainerStatus %s: %v",cdcreate.ID, err)
+								p.processAllContainers()
+							}else{
+								if err = p.newRemoteContainer(r); err != nil {
+									log.Errorf("fail to process container %s: %v",cdcreate.ID, err)
+								}
 							}
-
-
 
 						}
 					}else{
@@ -573,7 +577,7 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 	//infostru.RuntimeSpec.Process.Env = append(infostru.RuntimeSpec.Process.Env, "inspurcloud_logs_inspur-100-2-cluster-std_tag=a=1,b=2")
 
 	for _, e := range infostru.RuntimeSpec.Process.Env {
-		log.Info(e)
+		//log.Info(e)
 		for _, prefix := range p.logPrefix {
 			serviceLogs := fmt.Sprintf(ENV_SERVICE_LOGS_TEMPL, prefix)
 			if !strings.HasPrefix(e, serviceLogs) {
@@ -587,7 +591,7 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 			}
 		}
 	}
-	log.Info(labels)
+	//log.Info(labels)
 
 	c := make(map[string]string)
 	putIfNotEmpty(c, "docker_app", "-")
@@ -601,13 +605,13 @@ func (p *Pilot) newRemoteContainer(statusResponse *pb.ContainerStatusResponse) e
 
 
 	for _, e := range infostru.RuntimeSpec.Mounts{
-		log.Info(e)
+		//log.Info(e)
 		var tmp types.MountPoint
 		tmp.Destination = e.Destination
 		tmp.Source = e.Source
 		mounts = append(mounts, tmp)
 	}
-	log.Info(mounts)
+	//log.Info(mounts)
 
 	logConfigs, err := p.getLogConfigs(jsonLogPath, mounts, labels)
 	if err != nil {

@@ -93,13 +93,12 @@ func main() {
 	log.Info(logLevel)
 
 	var docker_sock_location  = "/var/run/docker.sock"
-	var usedockertuntime  = true
-	_, err = PathExists(docker_sock_location)
-	log.Info(err)
+	usedockertuntime, err := PathExists(docker_sock_location)
+	log.Info(usedockertuntime)
 	if err != nil {
 		log.Info("PathExists(%s),err(%v)\n", docker_sock_location, err)
 	}else{
-		usedockertuntime  = false
+
 	}
 
 
