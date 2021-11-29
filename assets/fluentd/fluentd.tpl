@@ -8,7 +8,7 @@
   {{if .Stdout}}
   @type json
   {{else}}
-      @type {{ .Format }}
+      @type nonex
       time_format = %Y-%m-%dT%H:%M:%S.%NZ
   {{end}}
   {{ $time_key := "" }}
