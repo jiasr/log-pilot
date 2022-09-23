@@ -11,34 +11,12 @@ WORKDIR $PILOT_DIR
 COPY . $PILOT_DIR
 RUN go build -o /go/bin
 
-FROM ruby:2.4-slim-buster as gem
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends g++ gcc make && \
-    echo 'gem: --no-document' >> /etc/gemrc && \
-    gem install elasticsearch -v 6.8.2 && \
-    gem install fluentd -v 1.4.2  && \
-    gem install fluent-plugin-elasticsearch -v 3.5.6  && \
-    gem install gelf -v "~> 3.0.0"  && \
-    gem install aliyun_sls_sdk -v ">=0.0.9"  && \
-    gem install remote_syslog_logger -v ">=1.0.1"  && \
-    gem install fluent-plugin-remote_syslog -v ">=0.2.1"  && \
-    gem install fluent-plugin-kafka  && \
-    gem install fluent-plugin-flowcounter  && \
-    gem install fluent-plugin-systemd -v 1.0.1
-
-FROM ruby:2.4-slim-buster
+FROM ruby:2.4-buster.20220923
 
 SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
-COPY --from=gem /usr/local/bundle/ /usr/local/bundle 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends libjemalloc2 python vim curl&& \
-    apt-get clean -y && \
-    ulimit -n 65536 && \    
+
+RUN ulimit -n 65536 && \
     rm -rf \
         /var/cache/debconf/* \
         /var/lib/apt/lists/* \

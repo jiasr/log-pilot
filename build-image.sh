@@ -12,7 +12,7 @@ build()
 
 case $1 in
 fluentd)
-    build fluentd
+    build fluentd1
     docker save log-pilot:latest > ./log-pilot_amd64.tar
     ;;
 *)

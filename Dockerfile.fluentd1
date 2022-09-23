@@ -1,0 +1,67 @@
+FROM golang:1.16.10-buster as builder
+
+ENV PILOT_DIR /go/src/github.com/log-pilot/
+ARG GOPROXY="https://goproxy.cn,direct"
+ARG GOOS=linux
+ARG GOARCH=amd64
+ARG GOFLAGS="-mod=mod"
+
+# RUN set -ex && apk add --no-cache make git
+WORKDIR $PILOT_DIR
+COPY . $PILOT_DIR
+RUN go build -o /go/bin
+
+FROM ruby:2.4-slim-buster as gem
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends g++ gcc make && \
+    echo 'gem: --no-document' >> /etc/gemrc && \
+    gem sources --add https://gems.ruby-china.com/ --remove https://rubygems.org/ && \
+    gem install elasticsearch -v 6.8.2  && \
+    gem install yajl-ruby -v 1.4.1 && \
+    gem install fluentd -v 1.4.2   && \
+    gem install fluent-plugin-elasticsearch -v 3.5.6    && \
+    gem install gelf -v "~> 3.0.0"    && \
+    gem install public_suffix -v 4.0.7 &&\
+    gem install aliyun_sls_sdk -v ">=0.0.9"   && \
+    gem install remote_syslog_logger -v ">=1.0.1"   && \
+    gem install fluent-plugin-remote_syslog -v ">=0.2.1"   && \
+    gem install fluent-plugin-kafka   && \
+    gem install fluent-plugin-flowcounter -  && \
+    gem install fluent-plugin-systemd -v 1.0.1
+
+FROM ruby:2.4-slim-buster
+
+SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
+COPY --from=gem /usr/local/bundle/ /usr/local/bundle 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libjemalloc2 python vim curl&& \
+    apt-get clean -y && \
+    ulimit -n 65536 && \    
+    rm -rf \
+        /var/cache/debconf/* \
+        /var/lib/apt/lists/* \
+        /var/log/* \
+        /var/tmp/* \
+        rm -rf /tmp/*
+
+COPY --from=builder /go/bin/log-pilot /pilot/pilot
+COPY assets/entrypoint assets/fluentd/ assets/healthz /pilot/
+RUN mkdir -p /etc/fluentd && \
+    mv /pilot/plugins /etc/fluentd/ && \
+    chmod +x /pilot/pilot /pilot/entrypoint /pilot/healthz /pilot/config.fluentd &&\
+    cp /usr/local/bundle/bin/fluentd /usr/bin/fluentd &&\
+    cp /usr/local/bundle/bin/fluentd /usr/local/bin/fluentd
+
+HEALTHCHECK CMD /pilot/healthz
+
+VOLUME /etc/fluentd/conf.d
+VOLUME /pilot/pos
+WORKDIR /pilot/
+ENV PILOT_TYPE=fluentd
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+CMD ["python","/pilot/entrypoint"]
